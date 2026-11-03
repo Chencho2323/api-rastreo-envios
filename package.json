@@ -1,0 +1,23 @@
+{
+  "name": "api-rastreo-envios",
+  "version": "0.1.0",
+  "description": "API de rastreo de envios multitransportadora: normaliza estados de paqueterias colombianas a un modelo comun y los publica por webhook.",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test --test-reporter=tap test/*.test.js"
+  },
+  "keywords": [
+    "rastreo",
+    "envios",
+    "webhooks",
+    "logistica"
+  ],
+  "author": "InheritDevs",
+  "license": "MIT",
+  "private": true
+}

@@ -23,29 +23,41 @@ produccion. El codigo esta aqui para que se pueda leer, ejecutar y auditar.
 ```bash
 git clone https://github.com/Chencho2323/api-rastreo-envios.git
 cd api-rastreo-envios
+npm install
 ```
 
-Los comandos exactos de instalacion y ejecucion estan en la seccion siguiente.
+No hay dependencias externas: `npm install` solo crea el arbol vacio y deja
+listo el runner. Hace falta Node.js 24 o superior.
 
 ## Uso
 
-La aplicacion expone su funcionalidad por linea de comandos o por HTTP, segun
-el caso. Los ejemplos concretos estan en `docs/` o en el `README` ampliado de
-cada version.
+```bash
+npm start                 # levanta el servidor en el puerto 3000
+PORT=8080 npm start       # otro puerto
+```
+
+Por ahora el servidor solo responde el chequeo de salud:
+
+```bash
+curl http://localhost:3000/salud
+# {"estado":"ok","servicio":"api-rastreo-envios"}
+```
+
+La configuracion se lee del entorno: `PORT`, `NODE_ENV` y `RUTA_BASE_DATOS`.
 
 ## Pruebas
 
 ```bash
-# el comando exacto lo declara el proyecto en verificar.sh
-./verificar.sh
+npm test        # runner de Node, sin dependencias
+./verificar.sh  # el mismo gate que corre el CI
 ```
 
 ## Estructura
 
 ```
 src/        codigo de la aplicacion
-test(s)/    pruebas automaticas
-docs/       documentacion de uso
+  app.js            servidor HTTP y rutas
+test/       pruebas automaticas
 ```
 
 ## Licencia
