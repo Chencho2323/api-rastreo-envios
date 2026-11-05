@@ -45,6 +45,27 @@ curl http://localhost:3000/salud
 
 La configuracion se lee del entorno: `PORT`, `NODE_ENV` y `RUTA_BASE_DATOS`.
 
+## Transportadoras
+
+Cada transportadora tiene su adaptador en `src/transportadoras.js`, con la
+tabla que traduce sus codigos y sus textos de novedad al modelo comun. Hoy
+estan Servientrega, Interrapidisimo, TCC, Envia y Coordinadora.
+
+```js
+import { traducirEvento } from "./src/transportadoras.js";
+
+traducirEvento({
+  transportadora: "Servientrega",
+  guia: "gui-9001",
+  estadoOriginal: "EN REPARTO",
+  ocurridoEn: "2026-11-02T08:15:00-05:00",
+});
+// estado: "en_transito", codigoOriginal: "EN REPARTO"
+```
+
+Un estado que no este en la tabla no se adivina: el adaptador falla y nombra el
+valor original para que se agregue la equivalencia.
+
 ## Pruebas
 
 ```bash
