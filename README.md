@@ -36,12 +36,36 @@ npm start                 # levanta el servidor en el puerto 3000
 PORT=8080 npm start       # otro puerto
 ```
 
-Por ahora el servidor solo responde el chequeo de salud:
+El servidor responde el chequeo de salud y la consulta de estado por guia:
 
 ```bash
 curl http://localhost:3000/salud
 # {"estado":"ok","servicio":"api-rastreo-envios"}
+
+curl http://localhost:3000/guias/gui-9001
 ```
+
+La consulta devuelve el estado actual del envio, la fecha del ultimo
+movimiento, si el envio ya cerro y el historial completo ordenado del mas viejo
+al mas nuevo:
+
+```json
+{
+  "guia": "GUI-9001",
+  "estado": "en_transito",
+  "ocurridoEn": "2026-11-02T14:00:00.000Z",
+  "cerrado": false,
+  "totalEventos": 2,
+  "eventos": [
+    { "estado": "generado", "ocurridoEn": "2026-11-01T13:00:00.000Z" },
+    { "estado": "en_transito", "ocurridoEn": "2026-11-02T14:00:00.000Z" }
+  ]
+}
+```
+
+El numero de guia se normaliza a mayusculas y solo admite letras, numeros y
+guion. Una guia sin eventos responde 404; una guia mal formada responde 400 y
+nombra el campo culpable.
 
 La configuracion se lee del entorno: `PORT`, `NODE_ENV` y `RUTA_BASE_DATOS`.
 
@@ -78,6 +102,8 @@ npm test        # runner de Node, sin dependencias
 ```
 src/        codigo de la aplicacion
   app.js            servidor HTTP y rutas
+  almacen.js        guarda los eventos por guia
+  consulta.js       arma el estado actual y el historial de una guia
 test/       pruebas automaticas
 ```
 
