@@ -36,7 +36,8 @@ npm start                 # levanta el servidor en el puerto 3000
 PORT=8080 npm start       # otro puerto
 ```
 
-El servidor responde el chequeo de salud y la consulta de estado por guia:
+El servidor responde el chequeo de salud, recibe eventos y consulta el estado
+por guia:
 
 ```bash
 curl http://localhost:3000/salud
@@ -44,6 +45,34 @@ curl http://localhost:3000/salud
 
 curl http://localhost:3000/guias/gui-9001
 ```
+
+Los eventos entran por `POST /eventos` o por `POST /guias/:guia/eventos`. El
+cuerpo puede traer el estado ya canonico o el texto crudo de la transportadora
+en `estadoOriginal`:
+
+```bash
+curl -X POST http://localhost:3000/eventos \
+  -H "content-type: application/json" \
+  -H "idempotency-key: notif-001" \
+  -d '{
+    "guia": "GUI-9001",
+    "transportadora": "Servientrega",
+    "estadoOriginal": "EN REPARTO",
+    "ocurridoEn": "2026-11-02T08:15:00-05:00",
+    "ciudad": "Medellin"
+  }'
+# 201 {"evento":{...},"duplicado":false,"totalEventos":1}
+```
+
+El registro es idempotente. Un evento con la misma guia, transportadora, estado
+y fecha no se guarda dos veces: la segunda vez responde 200 con
+`"duplicado": true` y el evento que ya estaba. La cabecera `idempotency-key` (o
+el campo `claveIdempotencia` en el cuerpo) cubre el caso en que el reintento
+llega con un texto distinto; reutilizar la clave para otro hecho responde 409.
+
+Un envio cerrado (entregado, devuelto o perdido) no acepta movimientos nuevos:
+responde 409 y nombra la guia. La repeticion del mismo hecho si se acepta, como
+duplicado.
 
 La consulta devuelve el estado actual del envio, la fecha del ultimo
 movimiento, si el envio ya cerro y el historial completo ordenado del mas viejo
@@ -103,6 +132,7 @@ npm test        # runner de Node, sin dependencias
 src/        codigo de la aplicacion
   app.js            servidor HTTP y rutas
   almacen.js        guarda los eventos por guia
+  registro.js       deduplica eventos y aplica la idempotencia
   consulta.js       arma el estado actual y el historial de una guia
 test/       pruebas automaticas
 ```

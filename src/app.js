@@ -1,14 +1,20 @@
 /**
  * Servidor HTTP de la API de rastreo.
  *
- * Expone el chequeo de salud y la consulta de estado por numero de guia. El
- * registro de eventos y la emision de webhooks llegan en las tareas siguientes.
+ * Expone el chequeo de salud, el registro de eventos y la consulta de estado
+ * por numero de guia. La emision de webhooks llega en la tarea siguiente.
  */
 
 import { createServer } from "node:http";
 
 import { crearAlmacen } from "./almacen.js";
-import { consultarGuia } from "./consulta.js";
+import { consultarGuia, normalizarGuia } from "./consulta.js";
+import { crearEvento, ErrorDeValidacion } from "./evento.js";
+import { crearRegistro } from "./registro.js";
+import { traducirEvento } from "./transportadoras.js";
+
+/** Tamano maximo del cuerpo de una peticion, en bytes. */
+export const LIMITE_CUERPO = 1024 * 100;
 
 /**
  * Escribe una respuesta JSON con su codigo de estado.
@@ -26,20 +32,182 @@ function responderJson(respuesta, codigo, cuerpo) {
 }
 
 /**
- * Crea el manejador de peticiones con su almacen.
- * @param {{deGuia: (guia: string) => Array<object>}} almacen
- * @returns {(peticion: import("node:http").IncomingMessage, respuesta: import("node:http").ServerResponse) => void}
+ * Lee el cuerpo de la peticion y lo interpreta como objeto JSON.
+ *
+ * Un cuerpo vacio o mal formado no se adivina: se rechaza con el campo
+ * `cuerpo` para que el cliente sepa que el problema no esta en sus datos de
+ * negocio sino en lo que mando.
+ * @param {import("node:http").IncomingMessage} peticion
+ * @returns {Promise<Record<string, unknown>>}
+ */
+function leerCuerpo(peticion) {
+  return new Promise((resolver, rechazar) => {
+    /** @type {Array<Buffer>} */
+    const partes = [];
+    let tamano = 0;
+    let rechazado = false;
+
+    peticion.on("data", (parte) => {
+      if (rechazado) {
+        return;
+      }
+
+      tamano += parte.length;
+
+      if (tamano > LIMITE_CUERPO) {
+        rechazado = true;
+        rechazar(
+          new ErrorDeValidacion(
+            "cuerpo",
+            `El cuerpo de la peticion no puede pasar de ${LIMITE_CUERPO} bytes.`,
+          ),
+        );
+        peticion.destroy();
+        return;
+      }
+
+      partes.push(parte);
+    });
+
+    peticion.on("error", (error) => {
+      if (!rechazado) {
+        rechazado = true;
+        rechazar(error);
+      }
+    });
+
+    peticion.on("end", () => {
+      if (rechazado) {
+        return;
+      }
+
+      const texto = Buffer.concat(partes).toString("utf8").trim();
+
+      if (texto === "") {
+        rechazar(new ErrorDeValidacion("cuerpo", "El cuerpo de la peticion esta vacio."));
+        return;
+      }
+
+      /** @type {unknown} */
+      let datos;
+
+      try {
+        datos = JSON.parse(texto);
+      } catch {
+        rechazar(new ErrorDeValidacion("cuerpo", "El cuerpo de la peticion no es JSON valido."));
+        return;
+      }
+
+      if (datos === null || typeof datos !== "object" || Array.isArray(datos)) {
+        rechazar(new ErrorDeValidacion("cuerpo", "El cuerpo de la peticion debe ser un objeto JSON."));
+        return;
+      }
+
+      resolver(/** @type {Record<string, unknown>} */ (datos));
+    });
+  });
+}
+
+/**
+ * Convierte el cuerpo de una peticion en un evento canonico.
+ *
+ * Se aceptan las dos formas en que llega un movimiento: tal como lo reporta la
+ * transportadora (con `estadoOriginal`) o ya traducido (con `estado`). El
+ * adaptador tiene la ultima palabra sobre la traduccion.
+ * @param {Record<string, unknown>} datos
+ * @returns {object}
+ */
+export function eventoDesdeCuerpo(datos) {
+  if ("estadoOriginal" in datos && datos.estadoOriginal !== null && datos.estadoOriginal !== undefined) {
+    return traducirEvento(
+      /** @type {Parameters<typeof traducirEvento>[0]} */ (datos),
+    );
+  }
+
+  return crearEvento(
+    /** @type {Parameters<typeof crearEvento>[0]} */ (datos),
+  );
+}
+
+/**
+ * Traduce un error de dominio en la respuesta HTTP que le corresponde.
+ * @param {import("node:http").ServerResponse} respuesta
+ * @param {unknown} error
+ */
+function responderError(respuesta, error) {
+  if (error instanceof Error) {
+    const codigo = /** @type {{codigo?: string}} */ (error).codigo;
+
+    if (codigo === "NO_ENCONTRADA") {
+      responderJson(respuesta, 404, { error: error.message });
+      return;
+    }
+
+    if (codigo === "CONFLICTO_IDEMPOTENCIA") {
+      responderJson(respuesta, 409, { error: error.message, campo: "claveIdempotencia" });
+      return;
+    }
+
+    if (codigo === "ENVIO_CERRADO") {
+      responderJson(respuesta, 409, { error: error.message, campo: "guia" });
+      return;
+    }
+
+    if (error.name === "ErrorDeValidacion") {
+      responderJson(respuesta, 400, {
+        error: error.message,
+        campo: /** @type {{campo?: string}} */ (error).campo ?? null,
+      });
+      return;
+    }
+  }
+
+  responderJson(respuesta, 500, { error: "Error interno del servidor." });
+}
+
+/**
+ * Crea el manejador de peticiones con su almacen y su registro.
+ * @param {{
+ *   agregar: (evento: object) => object,
+ *   deGuia: (guia: string) => Array<object>,
+ *   total: () => number,
+ * }} almacen
+ * @returns {(peticion: import("node:http").IncomingMessage, respuesta: import("node:http").ServerResponse) => Promise<void>}
  */
 export function crearManejador(almacen) {
+  const registro = crearRegistro(almacen);
+
   /**
    * @param {import("node:http").IncomingMessage} peticion
    * @param {import("node:http").ServerResponse} respuesta
    */
-  return function manejarPeticion(peticion, respuesta) {
+  return async function manejarPeticion(peticion, respuesta) {
     const url = new URL(peticion.url ?? "/", "http://localhost");
 
     if (peticion.method === "GET" && url.pathname === "/salud") {
       responderJson(respuesta, 200, { estado: "ok", servicio: "api-rastreo-envios" });
+      return;
+    }
+
+    if (peticion.method === "POST" && url.pathname === "/eventos") {
+      try {
+        const datos = await leerCuerpo(peticion);
+        const evento = eventoDesdeCuerpo(datos);
+
+        const claveDelCuerpo = datos.claveIdempotencia;
+        const claveDeCabecera = peticion.headers["idempotency-key"];
+        const claveIdempotencia = claveDelCuerpo ?? claveDeCabecera;
+
+        const resultado = registro.registrar(evento, { claveIdempotencia });
+
+        responderJson(respuesta, resultado.duplicado ? 200 : 201, {
+          evento: resultado.evento,
+          duplicado: resultado.duplicado,
+          totalEventos: resultado.total,
+        });
+      } catch (error) {
+        responderError(respuesta, error);
+      }
       return;
     }
 
@@ -49,18 +217,44 @@ export function crearManejador(almacen) {
       try {
         responderJson(respuesta, 200, consultarGuia(almacen, consulta[1]));
       } catch (error) {
-        if (error instanceof Error && "codigo" in error && error.codigo === "NO_ENCONTRADA") {
-          responderJson(respuesta, 404, { error: error.message });
-          return;
+        responderError(respuesta, error);
+      }
+      return;
+    }
+
+    const deGuia = url.pathname.match(/^\/guias\/([^/]+)\/eventos$/);
+
+    if (peticion.method === "POST" && deGuia !== null) {
+      try {
+        const guia = normalizarGuia(deGuia[1]);
+        const datos = await leerCuerpo(peticion);
+
+        if (datos.guia !== undefined && datos.guia !== null && datos.guia !== "") {
+          const guiaDelCuerpo = normalizarGuia(datos.guia);
+
+          if (guiaDelCuerpo !== guia) {
+            throw new ErrorDeValidacion(
+              "guia",
+              `El cuerpo dice la guia "${guiaDelCuerpo}" y la ruta dice "${guia}".`,
+            );
+          }
         }
-        if (error instanceof Error && error.name === "ErrorDeValidacion") {
-          responderJson(respuesta, 400, {
-            error: error.message,
-            campo: /** @type {{campo?: string}} */ (error).campo ?? null,
-          });
-          return;
-        }
-        responderJson(respuesta, 500, { error: "Error interno del servidor." });
+
+        const evento = eventoDesdeCuerpo({ ...datos, guia });
+
+        const claveDelCuerpo = datos.claveIdempotencia;
+        const claveDeCabecera = peticion.headers["idempotency-key"];
+        const claveIdempotencia = claveDelCuerpo ?? claveDeCabecera;
+
+        const resultado = registro.registrar(evento, { claveIdempotencia });
+
+        responderJson(respuesta, resultado.duplicado ? 200 : 201, {
+          evento: resultado.evento,
+          duplicado: resultado.duplicado,
+          totalEventos: resultado.total,
+        });
+      } catch (error) {
+        responderError(respuesta, error);
       }
       return;
     }
@@ -74,7 +268,7 @@ const almacenPorDefecto = crearAlmacen();
 
 /**
  * Crea el servidor HTTP sin ponerlo a escuchar.
- * @param {{almacen?: {deGuia: (guia: string) => Array<object>}}} opciones
+ * @param {{almacen?: {agregar: (evento: object) => object, deGuia: (guia: string) => Array<object>, total: () => number}}} opciones
  * @returns {import("node:http").Server}
  */
 export function crearServidor(opciones = {}) {
