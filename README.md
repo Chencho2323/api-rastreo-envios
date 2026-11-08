@@ -119,6 +119,47 @@ traducirEvento({
 Un estado que no este en la tabla no se adivina: el adaptador falla y nombra el
 valor original para que se agregue la equivalencia.
 
+## Webhooks
+
+Cada evento nuevo se avisa a las suscripciones registradas. Una suscripcion
+es una url y un secreto compartido; el secreto nunca se devuelve al leer:
+
+```bash
+curl -X POST http://localhost:3000/suscripciones \
+  -H "content-type: application/json" \
+  -d '{"url":"https://ejemplo.com/webhooks/rastreo","secreto":"minimo-16-caracteres","descripcion":"Notificaciones"}'
+# 201 {"suscripcion":{"id":"sus-...","url":"https://ejemplo.com/webhooks/rastreo",...}}
+```
+
+`GET /suscripciones` las lista y `DELETE /suscripciones/:id` las borra. La url
+tiene que usar http o https, el secreto al menos 16 caracteres y una url no se
+puede suscribir dos veces (409).
+
+El aviso es un `POST` con este cuerpo:
+
+```json
+{
+  "id": "avi-8f1c...",
+  "tipo": "evento.rastreo",
+  "emitidoEn": "2026-11-02T14:05:00.000Z",
+  "datos": { "guia": "GUI-9001", "estado": "en_transito", "ocurridoEn": "..." }
+}
+```
+
+Va firmado con HMAC-SHA256 del cuerpo en la cabecera `x-firma-sha256`
+(`sha256=<hex>`), con el identificador estable en `x-evento-id` y el numero de
+intento en `x-intento`. Para comprobarla:
+
+```js
+const esperada = createHmac("sha256", secreto).update(cuerpoCrudo, "utf8").digest("hex");
+const valida = `sha256=${esperada}` === peticion.headers["x-firma-sha256"];
+```
+
+Un 5xx, un 408 o un 429 se reintentan con espera creciente hasta cinco
+intentos; un 4xx de otro tipo no, porque el suscriptor ya rechazo el aviso. Los
+avisos de una misma suscripcion salen en orden y un evento duplicado no vuelve
+a avisar. Un webhook caido no retrasa ni tumba la recepcion del evento.
+
 ## Pruebas
 
 ```bash
@@ -134,6 +175,7 @@ src/        codigo de la aplicacion
   almacen.js        guarda los eventos por guia
   registro.js       deduplica eventos y aplica la idempotencia
   consulta.js       arma el estado actual y el historial de una guia
+  webhooks.js       suscripciones, firma HMAC y reintentos
 test/       pruebas automaticas
 ```
 

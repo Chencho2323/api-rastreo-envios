@@ -2,7 +2,8 @@
  * Servidor HTTP de la API de rastreo.
  *
  * Expone el chequeo de salud, el registro de eventos y la consulta de estado
- * por numero de guia. La emision de webhooks llega en la tarea siguiente.
+ * por numero de guia. Cada evento nuevo se avisa a las suscripciones de
+ * webhook registradas.
  */
 
 import { createServer } from "node:http";
@@ -12,6 +13,7 @@ import { consultarGuia, normalizarGuia } from "./consulta.js";
 import { crearEvento, ErrorDeValidacion } from "./evento.js";
 import { crearRegistro } from "./registro.js";
 import { traducirEvento } from "./transportadoras.js";
+import { crearEmisorWebhooks } from "./webhooks.js";
 
 /** Tamano maximo del cuerpo de una peticion, en bytes. */
 export const LIMITE_CUERPO = 1024 * 100;
@@ -153,6 +155,11 @@ function responderError(respuesta, error) {
       return;
     }
 
+    if (codigo === "SUSCRIPCION_DUPLICADA") {
+      responderJson(respuesta, 409, { error: error.message, campo: "url" });
+      return;
+    }
+
     if (error.name === "ErrorDeValidacion") {
       responderJson(respuesta, 400, {
         error: error.message,
@@ -172,10 +179,25 @@ function responderError(respuesta, error) {
  *   deGuia: (guia: string) => Array<object>,
  *   total: () => number,
  * }} almacen
+ * @param {{emisor?: ReturnType<typeof crearEmisorWebhooks>}} [opciones]
  * @returns {(peticion: import("node:http").IncomingMessage, respuesta: import("node:http").ServerResponse) => Promise<void>}
  */
-export function crearManejador(almacen) {
+export function crearManejador(almacen, opciones = {}) {
   const registro = crearRegistro(almacen);
+  const emisor = opciones.emisor ?? crearEmisorWebhooks();
+
+  /**
+   * Avisa a los suscriptores sin retrasar la respuesta al que publico el
+   * evento. Un webhook caido no puede tumbar la recepcion: los fallos se
+   * quedan en el resultado de la entrega y no en la peticion original.
+   * @param {object} evento
+   */
+  function avisar(evento) {
+    emisor.emitir(evento).catch(() => {
+      // El emisor ya reintenta y reporta por suscripcion; aqui solo se evita
+      // que un rechazo quede sin manejar.
+    });
+  }
 
   /**
    * @param {import("node:http").IncomingMessage} peticion
@@ -189,6 +211,39 @@ export function crearManejador(almacen) {
       return;
     }
 
+    if (peticion.method === "POST" && url.pathname === "/suscripciones") {
+      try {
+        const datos = await leerCuerpo(peticion);
+        responderJson(respuesta, 201, { suscripcion: emisor.suscribir(datos) });
+      } catch (error) {
+        responderError(respuesta, error);
+      }
+      return;
+    }
+
+    if (peticion.method === "GET" && url.pathname === "/suscripciones") {
+      responderJson(respuesta, 200, { suscripciones: emisor.suscripciones() });
+      return;
+    }
+
+    const suscripcion = url.pathname.match(/^\/suscripciones\/([^/]+)$/);
+
+    if (peticion.method === "DELETE" && suscripcion !== null) {
+      try {
+        const borrada = emisor.eliminar(decodeURIComponent(suscripcion[1]));
+
+        if (!borrada) {
+          responderJson(respuesta, 404, { error: "La suscripcion no existe." });
+          return;
+        }
+
+        responderJson(respuesta, 200, { eliminada: true });
+      } catch (error) {
+        responderError(respuesta, error);
+      }
+      return;
+    }
+
     if (peticion.method === "POST" && url.pathname === "/eventos") {
       try {
         const datos = await leerCuerpo(peticion);
@@ -199,6 +254,10 @@ export function crearManejador(almacen) {
         const claveIdempotencia = claveDelCuerpo ?? claveDeCabecera;
 
         const resultado = registro.registrar(evento, { claveIdempotencia });
+
+        if (!resultado.duplicado) {
+          avisar(resultado.evento);
+        }
 
         responderJson(respuesta, resultado.duplicado ? 200 : 201, {
           evento: resultado.evento,
@@ -248,6 +307,10 @@ export function crearManejador(almacen) {
 
         const resultado = registro.registrar(evento, { claveIdempotencia });
 
+        if (!resultado.duplicado) {
+          avisar(resultado.evento);
+        }
+
         responderJson(respuesta, resultado.duplicado ? 200 : 201, {
           evento: resultado.evento,
           duplicado: resultado.duplicado,
@@ -268,10 +331,13 @@ const almacenPorDefecto = crearAlmacen();
 
 /**
  * Crea el servidor HTTP sin ponerlo a escuchar.
- * @param {{almacen?: {agregar: (evento: object) => object, deGuia: (guia: string) => Array<object>, total: () => number}}} opciones
+ * @param {{
+ *   almacen?: {agregar: (evento: object) => object, deGuia: (guia: string) => Array<object>, total: () => number},
+ *   emisor?: ReturnType<typeof crearEmisorWebhooks>,
+ * }} opciones
  * @returns {import("node:http").Server}
  */
 export function crearServidor(opciones = {}) {
   const almacen = opciones.almacen ?? almacenPorDefecto;
-  return createServer(crearManejador(almacen));
+  return createServer(crearManejador(almacen, { emisor: opciones.emisor }));
 }
